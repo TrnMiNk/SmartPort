@@ -1,6 +1,7 @@
 const crypto = require('node:crypto');
 const { checkPolicy, evaluate } = require('./voyageValidationPolicy');
 const { etaPredictionAdapter, predictSafely, unavailablePrediction } = require('./etaPredictionAdapter');
+const { readUc015DatabaseTarget, verifyUc015Database } = require('../databaseSafety');
 
 const responseColumns = `id AS voyageId, validation_result AS validationResult, validation_reason AS validationReason,
     status, CAST(queue_position AS INT) AS queuePosition, predicted_eta AS predictedEta, ai_status AS aiStatus,
@@ -12,7 +13,9 @@ function businessError(status, code, body = {}) {
     const error = new Error(code); error.status = status; error.code = code; error.body = body; return error;
 }
 
-function createVoyageValidationService({ sql, poolPromise, policy, adapter = etaPredictionAdapter, clock = () => new Date(), etaTimeoutMs = 1500 }) {
+function createVoyageValidationService({ sql, poolPromise, policy, adapter = etaPredictionAdapter, clock = () => new Date(), etaTimeoutMs = 1500, env = process.env }) {
+    const databaseEnv = { DB_SERVER: env.DB_SERVER, DB_DATABASE: env.DB_DATABASE,
+        UC015_TEST_SERVER_NAME: env.UC015_TEST_SERVER_NAME, UC015_TEST_DATABASE_GUID: env.UC015_TEST_DATABASE_GUID };
     const request = connection => new sql.Request(connection);
 
     async function readInputs(connection, id, locked = false) {
@@ -51,8 +54,10 @@ function createVoyageValidationService({ sql, poolPromise, policy, adapter = eta
     }
 
     async function validate(id) {
+        const target = readUc015DatabaseTarget(databaseEnv);
         checkPolicy(policy, clock());
         const pool = await poolPromise;
+        await verifyUc015Database(sql, pool, target);
         // Preliminary eligibility before invoking UC016; no SQL transaction survives the adapter call.
         const snapshot = await readInputs(pool, id);
         const initial = evaluate(snapshot.row, snapshot.documents, policy, clock(), snapshot.row.declared_eta);
@@ -68,6 +73,8 @@ function createVoyageValidationService({ sql, poolPromise, policy, adapter = eta
         let tx;
         try {
             tx = new sql.Transaction(pool); await tx.begin(sql.ISOLATION_LEVEL.SERIALIZABLE);
+            // This Request uses the same transaction/connection as every subsequent write.
+            await verifyUc015Database(sql, tx, target);
             await lockQueue(tx);
             const { row, documents } = await readInputs(tx, id, true);
             const now = clock(); checkPolicy(policy, now);
@@ -108,10 +115,12 @@ function createVoyageValidationService({ sql, poolPromise, policy, adapter = eta
     }
 
     async function queue() {
+        const target = readUc015DatabaseTarget(databaseEnv);
         const pool = await poolPromise;
         const tx = new sql.Transaction(pool);
         await tx.begin(sql.ISOLATION_LEVEL.SERIALIZABLE);
         try {
+            await verifyUc015Database(sql, tx, target);
             await lockQueue(tx, 'Shared');
             const result = await request(tx).query(`/* uc015:queue */ SELECT ${responseColumns}
                 FROM dbo.voyages WHERE status='QUEUED' AND validation_result='VALID' AND queue_position IS NOT NULL ORDER BY queue_position`);

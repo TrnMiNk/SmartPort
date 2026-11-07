@@ -28,6 +28,7 @@ Trạng thái bàn giao: **hoàn thành luồng kiểm tra thủ công cho demo 
 
 Thêm:
 
+- `backend-nodejs/databaseSafety.js`: xác minh DB test bằng metadata SQL chỉ đọc (tên DB, server, database_guid).
 - `backend-nodejs/database/migrations/006_uc015_voyage_validation_queue.sql`
 - `backend-nodejs/services/voyageValidationPolicy.js`: đọc/kiểm tra policy demo, điều kiện hồ sơ và hạn chế.
 - `backend-nodejs/services/etaPredictionAdapter.js`: seam UC-016, timeout/fallback, không giả lập AI.
@@ -39,17 +40,19 @@ Thêm:
 
 Sửa:
 
+- `backend-nodejs/db.js`: hỗ trợ `DB_DATABASE`, giữ default cũ khi UC-015 tắt, fail closed khi demo chưa có target test được xác nhận.
+- `backend-nodejs/test/db.test.js`: hồi quy default/DB_SERVER và test chọn DB/đối chiếu metadata/đóng pool khi sai target.
 - `backend-nodejs/server.js`: mount UC-015 **trước** UC-013 `/:id`, tránh `/queue` bị coi là ID.
 - `QLDAPM/src/main/java/smartport_m1m/service/VoyageApiClient.java`: RestClient validate/queue, forward `X-UC015-Key`.
 - `QLDAPM/src/main/java/smartport_m1m/m1/service/VoyageService.java`: validate ID/key, chuyển status/JSON UC-015, fallback error body không null.
 - `QLDAPM/src/main/java/smartport_m1m/m1/controller/VoyageController.java`: hai route Spring, giới hạn loopback.
 - `QLDAPM/src/test/java/smartport_m1m/m1/controller/VoyageHttpIntegrationTest.java`: chạy Spring thật với HTTP upstream stub, thêm UC-015.
 
-Không sửa migration 001–005, db.js, route tiếp nhận UC-013/014, route UC-012 hoặc handler UC-014. Không thêm dependency.
+Không sửa migration 001–005, route tiếp nhận UC-013/014, route UC-012 hoặc handler UC-014. Không thêm dependency.
 
 ## Migration 006 – chỉ review, chưa thực thi
 
-File dùng `USE [CangThongMinh]`, transaction `TRY/CATCH`, `XACT_ABORT ON`, kiểm tra bảng/cột trước khi thêm. Không có seed, DELETE hoặc UPDATE dữ liệu demo. Tất cả trường mới nullable để voyage cũ và tài liệu hiện có được giữ nguyên. Sau migration, voyage ID 1 và 2 vẫn có trạng thái cũ và metadata UC-015 NULL.
+File gốc trong repo vẫn dùng `USE [CangThongMinh]` để giữ target legacy. **Không chạy nguyên file đó để test UC-015**: tạo bản sao bên ngoài repo và sửa thành `USE [CangThongMinh_UC015_Test]` như hướng dẫn Windows bên dưới. `DB_DATABASE` chỉ chọn DB cho Node, không đổi lệnh USE trong SSMS. Script có transaction `TRY/CATCH`, `XACT_ABORT ON`, kiểm tra bảng/cột trước khi thêm. Không có seed, DELETE hoặc UPDATE dữ liệu demo. Tất cả trường mới nullable để voyage cũ và tài liệu hiện có được giữ nguyên. Sau migration, voyage ID 1 và 2 vẫn có trạng thái cũ và metadata UC-015 NULL.
 
 Thêm trên `ship_documents`: `valid_from`, `valid_until` (`DATETIME2(3)`, UTC). CHECK cho phép cả hai NULL để giữ tương thích, hoặc đủ hai ngày với `valid_until > valid_from`. NULL không có nghĩa là vô thời hạn.
 
@@ -144,17 +147,36 @@ GET queue: `{"success":true,"data":[...cùng schema row...]}` theo queuePosition
 | 404 | Voyage không tồn tại, không ghi DB |
 | 422 + validationResult | Thiếu hồ sơ/REJECTED: **đã commit** reason/time; status ANNOUNCED, không có queuePosition |
 | 422 + `INVALID_VOYAGE_STATUS` | Ngoài ANNOUNCED/VALIDATED/QUEUED: không bắt đầu kiểm tra hồ sơ, giữ nguyên status và kết quả cũ; không sửa COMPLETED/CANCELLED |
-| 503 | Policy/key chưa cấu hình/hết hạn hoặc queue lock chưa lấy được; lỗi khả dụng, không đánh dấu MISSING_DOCUMENTS |
+| 503 | DB test chưa được chỉ định/xác minh hoặc không khớp metadata SQL, policy/key chưa cấu hình/hết hạn hoặc queue lock chưa lấy được; không đánh dấu MISSING_DOCUMENTS |
 | 500 tại Node | Lỗi DB/hệ thống, rollback mọi thay đổi của transaction |
 | 502 tại Spring | Node lỗi 500, kết nối hỏng hoặc JSON thành công không parse được/null; giữ nội dung lỗi nội bộ ở upstream |
 
 Spring dùng handler `VoyageExceptionHandler` của UC-014 để giữ HTTP/JSON cho 400/401/403/404/409/422/503 của UC-015. Không kết nối SQL từ Spring. Semantics error UC-013/014 hiện tại vẫn được kiểm thử hồi quy.
 
+## Chốt chặn database test (bản sửa sau c3ef869)
+
+`db.js` dùng `DB_DATABASE` đã trim; khi không đặt hoặc chỉ có khoảng trắng thì default vẫn là `CangThongMinh` cho UC-010–014. Khi `UC015_DEMO_ENABLED=true`, default đó **không được phép**: phải cung cấp đủ cấu hình sau trước khi Node được mở pool:
+
+| Biến môi trường | Giá trị do người chạy xác nhận |
+|---|---|
+| `DB_SERVER` | Địa chỉ/instance kết nối, ví dụ địa chỉ local đã kiểm chứng; bắt buộc khai báo rõ |
+| `DB_DATABASE` | `CangThongMinh_UC015_Test` đã restore; không chấp nhận CangThongMinh hoặc system DB, không phân biệt hoa thường/khoảng trắng |
+| `UC015_TEST_SERVER_NAME` | Giá trị `SERVERPROPERTY('ServerName')` từ SQL trên bản sao; có thể khác alias localhost/DB_SERVER |
+| `UC015_TEST_DATABASE_GUID` | `database_guid` của bản sao sau restore, lấy từ query SQL bên dưới, không dùng GUID ví dụ hoặc tự sinh |
+
+Chỉ cấu hình tên chứa Test không đủ. Sau connect, Node chạy SELECT `DB_NAME()`, `SERVERPROPERTY('ServerName')`, `sys.database_recovery_status.database_guid` và đối chiếu cả ba với target đã review. Sai/thiếu metadata hoặc không đủ quyền đọc thì đóng pool và reject `poolPromise`; cấu hình thiếu/sai bị từ chối trước khi mở kết nối. Không tự sửa DB, không tạo marker hoặc bảng SQL để lách kiểm tra.
+
+UC-015 kiểm tra lại identity trước đọc hồ sơ và **trong chính transaction/connection thực hiện các lệnh ghi**, trước cả applock và DML. GET queue cũng kiểm tra identity trong transaction chỉ đọc. Sai target trả 503 `UC015_TEST_DATABASE_REQUIRED` / `UC015_TEST_DATABASE_MISMATCH` / `UC015_TEST_DATABASE_UNVERIFIED`, không lưu kết quả validation. Nếu startup DB guard thất bại, Node chưa có pool khả dụng (thường dừng do promise bị reject), không được tiếp tục POST; Spring có thể chỉ báo 502 khi Node không chạy.
+
+Khi UC-015 tắt, các route cũ không thêm SELECT metadata hay yêu cầu quyền xem GUID. DB_DATABASE vẫn có tác dụng cho **toàn bộ** Node pool, gồm UC-010–014; không có connection riêng âm thầm trỏ về DB gốc.
+
+Đây là kiểm tra đúng target đã được operator xác nhận, không tự chứng minh một DB bất kỳ là dữ liệu test. Không chép metadata/env từ nguồn mà chưa review quá trình restore. Có thể khôi phục DB làm GUID đổi; dừng Node, xác nhận lại bằng SQL rồi cập nhật cấu hình và restart. Để bảo vệ thêm ở SQL Server, dùng Windows principal thử nghiệm chỉ có quyền trên DB sao chép và không có quyền ghi DB gốc; không chạy bằng sysadmin nếu không cần. Agent không tạo login, đổi quyền hoặc chỉnh dữ liệu SQL.
+
 ## Transaction, retry và thứ tự queue
 
-1. Đọc đầu vào/hồ sơ sơ bộ, chỉ gọi adapter nếu hồ sơ sơ bộ đạt. Không mở SQL transaction trong lúc chờ adapter/network.
+1. Xác minh identity SQL đúng DB test, rồi đọc đầu vào/hồ sơ sơ bộ, chỉ gọi adapter nếu hồ sơ sơ bộ đạt. Không mở SQL transaction trong lúc chờ adapter/network.
 2. Adapter mặc định không có provider: predictedEta NULL, aiStatus UNAVAILABLE. Lỗi, timeout 1500 ms hoặc output không hợp lệ cũng fallback. ETA khai báo chỉ là effectiveEta, **không gán sang predictedEta**.
-3. Mở SERIALIZABLE; lấy `sys.sp_getapplock` Exclusive, resource `SmartPort:UC015:queue`, owner Transaction, timeout 10000 ms **trước khi lấy row locks**. Đọc lại ship/voyage/documents với UPDLOCK/HOLDLOCK. Nếu đầu vào ETA thay đổi, bỏ prediction cũ.
+3. Mở SERIALIZABLE; xác minh lại DB identity trên cùng connection dùng để ghi, rồi lấy `sys.sp_getapplock` Exclusive, resource `SmartPort:UC015:queue`, owner Transaction, timeout 10000 ms **trước khi lấy row locks**. Đọc lại ship/voyage/documents với UPDLOCK/HOLDLOCK. Nếu đầu vào ETA thay đổi, bỏ prediction cũ.
 4. Kiểm tra lại tất cả điều kiện bằng thời điểm hiện tại và ETA được chọn. Ghi result/reason/time/hash; nếu VALID thì cuối transaction là QUEUED và history ANNOUNCED → VALIDATED → QUEUED. VALIDATED có thể tiếp tục QUEUED. Không thêm history khi đã QUEUED hợp lệ.
 5. Clear các queuePosition trong transaction rồi xếp lại: **effective ETA tăng dần, priority cao trước khi ETA bằng nhau (NULL = 0), queued_at, id**. Priority không cho tàu ETA muộn vượt mọi ETA sớm. Thay đổi policy thứ tự là quyết định nghiệp vụ sau này.
 6. Đọc response rồi commit. Lỗi ghi history/reorder/response khiến result, status, history, vị trí của cả những voyage khác đều rollback.
@@ -208,9 +230,37 @@ Nếu branch đã có local, dùng branch hiện có phù hợp thay vì lặp `
 
 POST validate **có ghi dữ liệu kể cả khi trả 422**, không dùng như dry-run trên DB gốc. Không thể gửi POST đó vào DB gốc rồi khẳng định hai voyage không đổi.
 
-Trước mọi smoke test ghi dữ liệu, backup/restore database trên **một SQL Server instance demo biệt lập**, giữ tên database `CangThongMinh` trên instance sao chép vì db.js và migration dùng tên này. Xác minh `@@SERVERNAME`, `DB_NAME()` và DB_SERVER của Node. Giữ instance gốc nguyên trạng, dừng Node cũ để tránh nhầm port. Bản sao phải có đúng ID 1/2 và các history/idempotency hiện tại.
+Dừng Node cũ để tránh gọi nhầm process đang giữ port 5000. Backup `CangThongMinh`, rồi qua SSMS Restore Database khôi phục thành **database mới `CangThongMinh_UC015_Test`**, ưu tiên instance demo biệt lập. Trong Files, chọn đường dẫn MDF/LDF mới, không ghi đè file của nguồn; không dùng tùy chọn overwrite/REPLACE lên DB gốc. Bản sao phải có đúng ID 1/2 và history/idempotency hiện tại. Giữ nguồn nguyên trạng. Agent không thực hiện backup/restore hoặc bất kỳ SQL ghi nào.
 
-Chỉ sau khi người dùng review SQL, tự quyết định chạy 006 trong SSMS **trên instance sao chép**. Agent chưa chạy bất kỳ migration nào. Kiểm tra lại số rows và status 1/2 ngay sau migration: phải giữ nguyên; metadata mới NULL. Có thể chạy lại script trên bản sao để kiểm tra tính rerunnable. Không chạy 001–005 lại vì chúng đã được áp dụng.
+Trong cửa sổ query SSMS riêng dành cho DB test, chạy **query chỉ đọc** sau trước migration và trước POST. Dùng cùng Windows identity mà Node sẽ dùng. Kiểm tra databaseName chính xác là `CangThongMinh_UC015_Test`, server đúng instance vừa restore, và có đúng một databaseGuid không NULL. Lưu lại hai giá trị serverName/databaseGuid để đặt env; GUID không phải secret nhưng không được đoán hoặc sinh ngẫu nhiên. Nếu query lỗi/không trả metadata, dừng để DBA kiểm tra quyền, không bỏ qua guard.
+
+```sql
+USE [CangThongMinh_UC015_Test];
+GO
+SELECT DB_NAME() AS databaseName,
+       CONVERT(nvarchar(128), SERVERPROPERTY(N'ServerName')) AS serverName,
+       CONVERT(varchar(36), database_guid) AS databaseGuid
+FROM sys.database_recovery_status WHERE database_id = DB_ID();
+SELECT ORIGINAL_LOGIN() AS original_login, SUSER_SNAME() AS executing_login;
+SELECT id, ship_id, voyage_code, status, declared_eta
+FROM dbo.voyages WHERE id IN (1,2) ORDER BY id;
+```
+
+Chỉ sau khi người dùng review SQL, tạo **bản sao script 006 ngoài repo** để chạy trên DB test. Đổi lệnh USE duy nhất của bản sao thành `USE [CangThongMinh_UC015_Test];`. Không sửa migration 001–005 và không chạy lại chúng; không chạy script gốc 006 đang trỏ CangThongMinh. Chọn DB trong dropdown SSMS không thắng lệnh USE của script.
+
+Có thể chuẩn bị bản sao bằng PowerShell sau (chỉ đọc/ghi tệp, **không thực thi SQL**):
+
+```powershell
+$source006 = Get-Content -Raw .\backend-nodejs\database\migrations\006_uc015_voyage_validation_queue.sql
+$test006 = $source006.Replace('USE [CangThongMinh];', 'USE [CangThongMinh_UC015_Test];')
+if ($test006 -eq $source006) { throw 'Khong tim thay USE cu; dung lai va review script' }
+$test006 = $test006.Replace('SET XACT_ABORT ON;', "IF DB_NAME() <> N'CangThongMinh_UC015_Test' THROW 50061, 'Wrong test database', 1;`r`nSET XACT_ABORT ON;")
+$test006 | Set-Content -Encoding UTF8 C:\SmartPortDemo\006_uc015_test_only.sql
+Select-String -Path C:\SmartPortDemo\006_uc015_test_only.sql -Pattern '^USE '
+# Phải chỉ có USE [CangThongMinh_UC015_Test]; mở SSMS và review toàn bộ bản sao trước khi tự chạy.
+```
+
+Bản sao trên thêm guard `DB_NAME()` trong cùng batch với migration trước `SET XACT_ABORT ON`; nếu đổi USE không thành công thì batch dừng trước DDL. Nếu sửa file thủ công, giữ guard trong cùng batch, không chèn GO để rồi chạy tiếp batch sau khi guard lỗi. Chốt tên này hỗ trợ review script; Node vẫn đối chiếu thêm server/GUID. Sau khi tự chạy migration trên DB test, xác minh count/status voyage 1/2 không đổi, metadata mới NULL; chạy lại query identity ở trên. Agent chưa chạy migration. Không dùng POST để kiểm tra DB gốc.
 
 Trên bản sao, đọc loại tàu/hồ sơ thực tế, tạo policy demo được reviewer xác nhận. Với case VALID, nhập hai ngày đã kiểm chứng cho những tài liệu APPROVED đủ loại bằng quy trình quản trị demo. Nếu hồ sơ thực tế không đủ, kết quả 422 là đúng; không sửa dữ liệu gốc, không tự approve để ép PASS. Dùng fixture mới trên bản sao cho các case PENDING/REJECTED/expired/inactive/restricted; ghi nhận rõ đó là fixture, không kết luận voyage thật hợp lệ.
 
@@ -219,7 +269,10 @@ Trên bản sao, đọc loại tàu/hồ sơ thực tế, tạo policy demo đư
 Trong PowerShell tại repository, cấu hình trước khi start Node. File policy và document storage để ngoài repo. Thay mọi placeholder; không commit khóa hoặc policy vận hành.
 
 ```powershell
-$env:DB_SERVER = '<SQL_SERVER_INSTANCE_SAO_CHEP_DA_XAC_MINH>'
+$env:DB_SERVER = '<DIA_CHI_SQL_SERVER_DA_XAC_MINH>'
+$env:DB_DATABASE = 'CangThongMinh_UC015_Test'
+$env:UC015_TEST_SERVER_NAME = '<serverName_TRA_VE_TU_SQL>'
+$env:UC015_TEST_DATABASE_GUID = '<databaseGuid_TRA_VE_TU_SQL>'
 $env:HOST = '127.0.0.1'
 $env:NODE_ENV = 'development'
 $env:UC015_DEMO_ENABLED = 'true'
@@ -231,8 +284,22 @@ $env:UC015_OPERATOR_TOKEN = [Convert]::ToBase64String($randomBytes)
 $env:UC015_POLICY_FILE = 'C:\SmartPortDemo\uc015-policy.json'
 $env:DOCUMENT_STORAGE_DIR = 'C:\SmartPortDemo\documents'
 # Chuẩn bị và review file policy trước; mẫu trong repo cố ý hết hạn.
+# Chưa start server: xác nhận pool của CHÍNH db.js bằng preflight chỉ đọc bên dưới.
+```
+
+Sau khi đặt env, xác minh bằng chính cấu hình Node, **chưa POST và chưa start server**:
+
+```powershell
+Set-Location backend-nodejs
+node -e "const {poolPromise}=require('./db'); const {DATABASE_IDENTITY_SQL}=require('./databaseSafety'); poolPromise.then(async p=>{try{console.table((await p.request().query(DATABASE_IDENTITY_SQL)).recordset)}finally{await p.close()}}).catch(e=>{console.error(e.message);process.exitCode=1})"
+if ($LASTEXITCODE -ne 0) { throw 'DB test chua duoc xac minh; dung lai, khong POST' }
+Set-Location ..
+# So sánh bảng in ra với query SSMS: cùng databaseName, serverName, databaseGuid.
+# Chỉ tiếp tục sau khi đã xác nhận đúng bản sao và migration 006 trên bản sao thành công.
 Start-Process node -ArgumentList 'server.js' -WorkingDirectory "$PWD\backend-nodejs"
 ```
+
+Node khi khởi động phải log `UC015 test database identity verified` đúng target; không có lỗi REQUIRED/MISMATCH/UNVERIFIED. Process cũ phải được dừng trước đó. Đổi env ở shell không đổi pool của process đã chạy: luôn restart Node sau khi đổi DB_SERVER/DB_DATABASE/target hoặc restore lại DB.
 
 Mở terminal thứ hai để chạy Spring bằng JDK25:
 
@@ -245,7 +312,7 @@ Set-Location QLDAPM
 
 ```powershell
 $headers = @{ 'X-UC015-Key' = $env:UC015_OPERATOR_TOKEN }
-# CHỈ khi Node đang trỏ tới instance SAO CHÉP đã xác minh.
+# CHỈ sau khi preflight Node/SSMS khớp DB CangThongMinh_UC015_Test và đã review/chạy 006 trên bản sao.
 curl.exe -i -X POST -H "X-UC015-Key: $($env:UC015_OPERATOR_TOKEN)" http://127.0.0.1:8080/api/v1/voyages/1/validate
 curl.exe -i -X POST -H "X-UC015-Key: $($env:UC015_OPERATOR_TOKEN)" http://127.0.0.1:8080/api/v1/voyages/2/validate
 Invoke-RestMethod -Headers $headers http://127.0.0.1:8080/api/v1/voyages/queue | ConvertTo-Json -Depth 8
@@ -256,13 +323,13 @@ Cần so sánh HTTP Node trực tiếp: thay port 8080 thành 5000 và `/api/v1`
 
 ### 4. Kiểm tra cạnh tranh/rollback thực tế cần thực hiện sau review
 
-Trên instance sao chép, chuẩn bị hai voyage fixture đủ hồ sơ, ETA bằng nhau và priority khác nhau; gửi hai POST từ hai terminal/PowerShell job cùng lúc. Lặp nhiều POST cho cùng voyage. Đối chiếu query phía dưới: không vị trí trùng, mỗi voyage một row, một cặp history VALIDATED/QUEUED khi không có chuyển trạng thái mới. Thử thêm voyage ETA sớm hơn và xác nhận policy ETA-first.
+Trên DB `CangThongMinh_UC015_Test` đã xác minh, chuẩn bị hai voyage fixture đủ hồ sơ, ETA bằng nhau và priority khác nhau; gửi hai POST từ hai terminal/PowerShell job cùng lúc. Lặp nhiều POST cho cùng voyage. Đối chiếu query phía dưới: không vị trí trùng, mỗi voyage một row, một cặp history VALIDATED/QUEUED khi không có chuyển trạng thái mới. Thử thêm voyage ETA sớm hơn và xác nhận policy ETA-first.
 
 Để kiểm chứng rollback SQL Server thật, chỉ trên bản sao dùng cơ chế fault injection được reviewer quản lý (ví dụ quyền ghi history bị từ chối cho tài khoản thử nghiệm riêng), xác minh lỗi 500 Node/502 Spring và mọi row/history/queue giữ nguyên. Không sửa quyền, thêm trigger gây lỗi hoặc xóa dữ liệu trên DB gốc. Test mock đã bao phủ việc ném lỗi ở save/history/reorder/response, nhưng chưa chứng minh engine SQL/ODBC/permission hoạt động giống mô phỏng.
 
 ## SSMS – các truy vấn chỉ đọc
 
-Trước 006, trên DB gốc hoặc bản sao để lưu baseline:
+Các truy vấn baseline dưới đây chỉ đọc. Trong phiên kiểm thử UC-015, dùng cửa sổ SSMS của `CangThongMinh_UC015_Test` và xác nhận serverName/databaseGuid theo query identity ở trên. Có thể đọc nguồn riêng để đối chiếu baseline, không chạy migration/POST lên nguồn:
 
 ```sql
 SELECT @@SERVERNAME AS instance_name, DB_NAME() AS database_name;
@@ -323,10 +390,12 @@ Các bộ test dùng SQL doubles có staging/commit/rollback; kiểm thử cạn
 
 | Check | Kết quả |
 |---|---|
-| `npm test` | 83/83 PASS, 0 fail/skip |
-| `node --check` toàn bộ source/test JS ngoài node_modules | 16/16 tệp PASS |
+| `npm test` | 106/106 PASS, 0 fail/skip |
+| `node --check` toàn bộ source/test JS ngoài node_modules | 17/17 tệp PASS |
 | JDK 25 + Gradle `clean test` | 67/67 PASS, 0 fail/error/skip; JDK 25.0.5.0.3 |
 | `git diff --check` | PASS |
 | SQL Server / chạy 006 / voyage 1/2 thực tế | Chưa chạy, chờ review và smoke test trên bản sao |
 
 Bao phủ: VALID, thiếu tài liệu, PENDING/REJECTED, expiry/missing dates/future validity, IMO, active, hạn chế, policy chưa cấu hình/hết hạn, ID/status, fallback AI lỗi/timeout/JSON sai, ETA dự báo và thời hạn tài liệu, ETA/priority/tie-break, revalidation ổn định, gỡ queue khi kiểm tra không đạt, rollback (cả queue khác), validation đồng thời, dữ liệu đổi trong lúc chờ adapter, bảo vệ key/local/demo, Spring chuyển status/JSON và hồi quy các test UC-010 đến UC-014 hiện có. Không tắt/skip test cũ.
+
+Bản sửa DB guard sau `c3ef869` bổ sung 23 test: DB_DATABASE override/default, chặn thiếu/sai target trước connect, đối chiếu tên DB/server/GUID thực trả về, metadata thiếu/lỗi, đóng pool khi không khớp, HTTP 503 cho DB gốc dù env đặt tên test, kiểm tra lại đúng connection transaction và rollback khi identity đổi trong lúc chờ adapter. Không có SQL Server thật hoặc migration nào được chạy trong bộ test.

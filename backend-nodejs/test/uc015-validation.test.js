@@ -8,6 +8,8 @@ const { createVoyageValidationRouter } = require('../routes/voyageValidation');
 const now = new Date('2026-11-07T05:00:00Z');
 const clock = () => new Date(now);
 const token = require('node:crypto').randomBytes(32).toString('hex');
+const databaseEnv = { DB_SERVER: 'localhost\\TEST', DB_DATABASE: 'CangThongMinh_UC015_Test',
+    UC015_TEST_SERVER_NAME: 'TEST-HOST\\TEST', UC015_TEST_DATABASE_GUID: '12345678-1234-1234-1234-123456789abc' };
 const rawPolicy = () => ({ mode: 'DEMO', policyId: 'reviewed-test-policy', reviewedAt: '2026-11-01T00:00:00Z',
     validUntil: '2026-12-01T00:00:00Z', requiredDocumentTypesByShipType: { Container: ['Registry', 'Safety'] }, restrictedImos: [] });
 const policy = () => parsePolicy(rawPolicy());
@@ -29,7 +31,9 @@ const publicRow = row => ({ voyageId: row.id, validationResult: row.validation_r
 // not SQL Server's actual engine/DDL/locking behavior.
 function database() {
     const db = { state: { voyages: [voyage()], documents: documents(), history: [] }, fail: null, active: 0,
-        commits: 0, rollbacks: 0, queries: [], lockModes: [], tail: Promise.resolve() };
+        commits: 0, rollbacks: 0, queries: [], lockModes: [], tail: Promise.resolve(),
+        identity: { databaseName: databaseEnv.DB_DATABASE, serverName: databaseEnv.UC015_TEST_SERVER_NAME,
+            databaseGuid: databaseEnv.UC015_TEST_DATABASE_GUID } };
     class Transaction {
         async begin(level) { assert.equal(level, 'SERIALIZABLE'); db.active++; }
         async commit() { if (this.staged) db.state = this.staged; db.active--; db.commits++; this.release?.(); }
@@ -51,6 +55,7 @@ function database() {
             const state = this.tx?.staged || db.state;
             const row = state.voyages.find(v => v.id === this.p.id);
             switch (tag) {
+                case 'database': return { recordset: [structuredClone(this.tx && db.transactionIdentity ? db.transactionIdentity : db.identity)] };
                 case 'inputs':
                     if (this.tx) assert.match(query, /UPDLOCK, HOLDLOCK/);
                     return { recordset: row ? [structuredClone(row)] : [] };
@@ -81,7 +86,7 @@ function database() {
     db.sql = { Transaction, Request, Int: 'Int', VarChar: () => 'VarChar', NVarChar: () => 'NVarChar',
         Char: () => 'Char', DateTime2: () => 'DateTime2', ISOLATION_LEVEL: { SERIALIZABLE: 'SERIALIZABLE' } };
     db.poolPromise = Promise.resolve({});
-    db.service = options => createVoyageValidationService({ sql: db.sql, poolPromise: db.poolPromise, policy: policy(), clock, ...options });
+    db.service = options => createVoyageValidationService({ sql: db.sql, poolPromise: db.poolPromise, policy: policy(), clock, env: databaseEnv, ...options });
     return db;
 }
 let db;
@@ -232,7 +237,7 @@ test('status changing to COMPLETED during AI wait cannot be overwritten', async 
 });
 
 let server; let base; let httpDb;
-const env = { UC015_DEMO_ENABLED: 'true', UC015_OPERATOR_TOKEN: token };
+const env = { ...databaseEnv, UC015_DEMO_ENABLED: 'true', UC015_OPERATOR_TOKEN: token };
 before(async () => {
     const app = express(); app.use(express.json());
     app.use('/api/voyages', (req, res, next) => createVoyageValidationRouter({ sql: httpDb.sql,
@@ -283,4 +288,48 @@ test('HTTP rejects missing operator configuration and invalid policy before DB w
     assert.equal(response.status, 503); assert.equal(response.body.code, 'VALIDATION_POLICY_UNAVAILABLE');
     response = await callRouter({ env, policy: policy() }, '192.0.2.10', '/queue');
     assert.equal(response.status, 403); assert.equal(db.queries.length, 0);
+});
+
+for (const [name, options] of [
+    ['missing explicit target', { env: {} }],
+    ['original database configured', { env: { ...databaseEnv, DB_DATABASE: 'CangThongMinh' } }]
+]) test(`${name} blocks direct UC015 service calls before any SQL`, async () => {
+    const service = db.service(options);
+    await assert.rejects(service.validate(1), { status: 503, code: 'UC015_TEST_DATABASE_REQUIRED' });
+    await assert.rejects(service.queue(), { status: 503, code: 'UC015_TEST_DATABASE_REQUIRED' });
+    assert.equal(db.queries.length, 0);
+});
+
+test('actual original database blocks both HTTP routes despite a test database in env', async () => {
+    httpDb = db; db.identity.databaseName = 'CangThongMinh';
+    const before = structuredClone(db.state);
+    const response = await post(1);
+    assert.equal(response.status, 503);
+    assert.equal((await response.json()).code, 'UC015_TEST_DATABASE_MISMATCH');
+    const queue = await fetch(`${base}/queue`, { headers: { 'X-UC015-Key': token } });
+    assert.equal(queue.status, 503);
+    assert.deepEqual(db.state, before);
+    assert.equal(db.queries.some(q => /uc015:(inputs|save|history|reorder|queue|lock)/.test(q)), false);
+});
+
+test('verification uses the transaction connection before any business lock/read/write', async () => {
+    db.transactionIdentity = { ...db.identity, databaseGuid: 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa' };
+    const before = structuredClone(db.state);
+    await assert.rejects(db.service().validate(1), { status: 503, code: 'UC015_TEST_DATABASE_MISMATCH' });
+    assert.deepEqual(db.state, before);
+    assert.equal(db.rollbacks, 1); assert.equal(db.active, 0);
+    assert.equal(db.queries.some(q => /uc015:(save|history|reorder|lock)/.test(q)), false);
+});
+
+test('identity changing during adapter wait is rejected and rolls back without touching queue/history', async () => {
+    const before = structuredClone(db.state);
+    const adapter = { async predict() { db.identity.databaseName = 'CangThongMinh'; return { aiStatus: 'UNAVAILABLE' }; } };
+    await assert.rejects(db.service({ adapter }).validate(1), { status: 503, code: 'UC015_TEST_DATABASE_MISMATCH' });
+    assert.deepEqual(db.state, before); assert.equal(db.rollbacks, 1);
+});
+
+test('metadata query failure is system unavailability, never a stored missing-documents result', async () => {
+    const before = structuredClone(db.state); db.fail = 'database';
+    await assert.rejects(db.service().validate(1), { status: 503, code: 'UC015_TEST_DATABASE_UNVERIFIED' });
+    assert.deepEqual(db.state, before); assert.equal(db.commits, 0);
 });

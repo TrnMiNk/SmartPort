@@ -13,7 +13,7 @@ function createVoyageValidationRouter({ sql, poolPromise, env = process.env, pol
         try { policy = loadPolicy(env.UC015_POLICY_FILE); }
         catch (_) { policyError = true; logger.error('UC015 policy configuration invalid'); }
     }
-    const service = createVoyageValidationService({ sql, poolPromise, policy, adapter, clock, etaTimeoutMs });
+    const service = createVoyageValidationService({ sql, poolPromise, policy, adapter, clock, etaTimeoutMs, env });
 
     function protect(req, res, next) {
         if (!enabled || !['127.0.0.1', '::1', '::ffff:127.0.0.1'].includes(req.socket.remoteAddress))
