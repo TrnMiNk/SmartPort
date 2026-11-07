@@ -18,6 +18,9 @@ const poolPromise = new sql.ConnectionPool(config)
         console.log('✅ Đã kết nối thành công tới SQL Server CangThongMinh');
         return pool;
     })
-    .catch(err => console.error('❌ Lỗi kết nối CSDL: ', err));
+    .catch(err => {
+        console.error('❌ Lỗi kết nối CSDL: ', err);
+        throw err;
+    });
 
 module.exports = { sql, poolPromise };
