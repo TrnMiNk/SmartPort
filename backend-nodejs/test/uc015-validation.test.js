@@ -174,16 +174,16 @@ test('AI timeout is aborted and falls back without a transaction during wait', a
 });
 test('valid provider ETA is stored distinctly and drives queue ordering', async () => {
     db.state.voyages.push(voyage(2, { declared_eta: new Date('2026-11-10T00:00:00Z') })); await db.service().validate(2);
-    const adapter = { async predict() { return { aiStatus: 'AVAILABLE', predictedEta: '2026-11-08T00:00:00Z' }; } };
+    const adapter = { async predict() { return { aiStatus: 'AVAILABLE', predictionSource: 'MODEL', etaConfidence: 0.8, modelVersion: 'unit-fixture-v1', predictedEta: '2026-11-08T00:00:00Z' }; } };
     const result = await db.service({ adapter }).validate(1); assert.equal(result.body.aiStatus, 'AVAILABLE');
     assert.equal(result.body.queuePosition, 1); assert.equal(db.state.voyages.find(v => v.id === 2).queue_position, 2);
 });
 test('documents must cover predicted ETA as well', async () => {
-    const adapter = { async predict() { return { aiStatus: 'AVAILABLE', predictedEta: '2026-12-02T00:00:00Z' }; } };
+    const adapter = { async predict() { return { aiStatus: 'AVAILABLE', predictionSource: 'MODEL', etaConfidence: 0.8, modelVersion: 'unit-fixture-v1', predictedEta: '2026-12-02T00:00:00Z' }; } };
     assert.equal((await db.service({ adapter }).validate(1)).body.validationResult, 'MISSING_DOCUMENTS');
 });
 test('malformed provider response never masquerades as a prediction', async () => {
-    const adapter = { async predict() { return { aiStatus: 'AVAILABLE', predictedEta: 'tomorrow' }; } };
+    const adapter = { async predict() { return { aiStatus: 'AVAILABLE', predictionSource: 'MODEL', etaConfidence: 0.8, modelVersion: 'unit-fixture-v1', predictedEta: 'tomorrow' }; } };
     assert.equal((await db.service({ adapter }).validate(1)).body.aiStatus, 'UNAVAILABLE');
 });
 test('ETA first, higher priority at equal ETA, then stable queue time/id', async () => {
@@ -198,7 +198,7 @@ test('validation replay preserves membership, position, queuedAt and history cou
     assert.equal(db.state.voyages.length, 1); assert.equal(db.state.history.length, 2);
 });
 test('recheck uses existing AI prediction for unchanged inputs', async () => {
-    let calls = 0; const service = db.service({ adapter: { async predict() { calls++; return { aiStatus: 'AVAILABLE', predictedEta: '2026-11-08T00:00:00Z' }; } } });
+    let calls = 0; const service = db.service({ adapter: { async predict() { calls++; return { aiStatus: 'AVAILABLE', predictionSource: 'MODEL', etaConfidence: 0.8, modelVersion: 'unit-fixture-v1', predictedEta: '2026-11-08T00:00:00Z' }; } } });
     await service.validate(1); await service.validate(1); assert.equal(calls, 1);
 });
 test('invalid recheck removes membership and commits ANNOUNCED only once', async () => {
@@ -228,7 +228,7 @@ test('documents changing during adapter wait are checked again under locks', asy
 });
 test('ETA changing during adapter wait discards stale prediction', async () => {
     const adapter = { async predict() { db.state.voyages[0].declared_eta = new Date('2026-11-13T00:00:00Z');
-        return { aiStatus: 'AVAILABLE', predictedEta: '2026-11-08T00:00:00Z' }; } };
+        return { aiStatus: 'AVAILABLE', predictionSource: 'MODEL', etaConfidence: 0.8, modelVersion: 'unit-fixture-v1', predictedEta: '2026-11-08T00:00:00Z' }; } };
     const result = await db.service({ adapter }).validate(1); assert.equal(result.body.aiStatus, 'UNAVAILABLE'); assert.equal(result.body.predictedEta, null);
 });
 test('status changing to COMPLETED during AI wait cannot be overwritten', async () => {

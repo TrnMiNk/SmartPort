@@ -50,6 +50,24 @@ public class VoyageService {
             throw new ResponseStatusException(HttpStatus.UNAUTHORIZED, "X-UC015-Key is required");
     }
 
+    public Map<String, Object> predictEta(long id, String operatorKey) {
+        requireEtaRequest(id, operatorKey);
+        return invokeValidation(() -> client.predictEta(id, operatorKey));
+    }
+
+    public Map<String, Object> etaHistory(long id, String operatorKey, Long beforeId) {
+        requireEtaRequest(id, operatorKey);
+        if (beforeId != null && beforeId <= 0)
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "beforeId must be positive");
+        return invokeValidation(() -> client.etaHistory(id, operatorKey, beforeId));
+    }
+
+    private void requireEtaRequest(long id, String operatorKey) {
+        requireOperatorKey(operatorKey);
+        if (id <= 0 || id > Integer.MAX_VALUE)
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "id must be a positive integer");
+    }
+
     private Map<String, Object> invokeValidation(java.util.function.Supplier<Map<String, Object>> call) {
         try {
             Map<String, Object> result = call.get();

@@ -1,4 +1,5 @@
-const crypto = require('node:crypto');
+const { createHash } = require('node:crypto');
+const { lockVoyageQueue, reorderVoyageQueue } = require('./voyageQueue');
 const { checkPolicy, evaluate } = require('./voyageValidationPolicy');
 const { etaPredictionAdapter, predictSafely, unavailablePrediction } = require('./etaPredictionAdapter');
 const { readUc015DatabaseTarget, verifyUc015Database } = require('../databaseSafety');
@@ -32,27 +33,6 @@ function createVoyageValidationService({ sql, poolPromise, policy, adapter = eta
         return { row, documents: docs.recordset };
     }
 
-    // Every UC015 queue writer takes this transaction-owned DB lock FIRST (works across Node processes).
-    async function lockQueue(tx, mode = 'Exclusive') {
-        const result = await request(tx).input('mode', sql.VarChar(20), mode).query(`/* uc015:lock */
-            DECLARE @result int;
-            EXEC @result = sys.sp_getapplock @Resource=N'SmartPort:UC015:queue', @LockMode=@mode,
-                @LockOwner='Transaction', @LockTimeout=10000;
-            SELECT @result AS lockResult;`);
-        if (!(result.recordset[0]?.lockResult >= 0)) throw businessError(503, 'QUEUE_BUSY');
-    }
-
-    async function reorder(tx) {
-        // Clear before reassigning to avoid transient collisions in the filtered unique index.
-        await request(tx).query(`/* uc015:reorder */
-            UPDATE dbo.voyages SET queue_position = NULL WHERE queue_position IS NOT NULL;
-            WITH ranked AS (
-                SELECT id, ROW_NUMBER() OVER (ORDER BY COALESCE(predicted_eta, declared_eta),
-                    COALESCE(priority_level, 0) DESC, queued_at, id) AS position
-                FROM dbo.voyages WHERE status = 'QUEUED' AND validation_result = 'VALID'
-            ) UPDATE v SET queue_position = r.position FROM dbo.voyages v JOIN ranked r ON r.id = v.id;`);
-    }
-
     async function validate(id) {
         const target = readUc015DatabaseTarget(databaseEnv);
         checkPolicy(policy, clock());
@@ -62,7 +42,7 @@ function createVoyageValidationService({ sql, poolPromise, policy, adapter = eta
         const snapshot = await readInputs(pool, id);
         const initial = evaluate(snapshot.row, snapshot.documents, policy, clock(), snapshot.row.declared_eta);
         const aiInput = row => JSON.stringify({ voyageId: row.id, vesselId: row.ship_id, declaredEta: row.declared_eta });
-        const inputHash = row => crypto.createHash('sha256').update(aiInput(row)).digest('hex');
+        const inputHash = row => createHash('sha256').update(aiInput(row)).digest('hex');
         let prediction = { ...unavailablePrediction };
         if (initial.result === 'VALID') {
             // Keep an unchanged queue entry stable on recheck; new inputs permit a fresh prediction.
@@ -75,7 +55,7 @@ function createVoyageValidationService({ sql, poolPromise, policy, adapter = eta
             tx = new sql.Transaction(pool); await tx.begin(sql.ISOLATION_LEVEL.SERIALIZABLE);
             // This Request uses the same transaction/connection as every subsequent write.
             await verifyUc015Database(sql, tx, target);
-            await lockQueue(tx);
+            await lockVoyageQueue(sql, tx);
             const { row, documents } = await readInputs(tx, id, true);
             const now = clock(); checkPolicy(policy, now);
             // An ETA prediction for changed inputs must not be attached to the newer voyage.
@@ -103,7 +83,7 @@ function createVoyageValidationService({ sql, poolPromise, policy, adapter = eta
                     .query(`/* uc015:history */ INSERT dbo.voyage_status_history(voyage_id,status,changed_by)
                         VALUES(@id,@status,N'uc015-local-demo')`);
             }
-            await reorder(tx);
+            await reorderVoyageQueue(sql, tx);
             const result = await request(tx).input('id', sql.Int, id)
                 .query(`/* uc015:response */ SELECT ${responseColumns} FROM dbo.voyages WHERE id=@id`);
             await tx.commit(); tx = null;
@@ -121,7 +101,7 @@ function createVoyageValidationService({ sql, poolPromise, policy, adapter = eta
         await tx.begin(sql.ISOLATION_LEVEL.SERIALIZABLE);
         try {
             await verifyUc015Database(sql, tx, target);
-            await lockQueue(tx, 'Shared');
+            await lockVoyageQueue(sql, tx, 'Shared');
             const result = await request(tx).query(`/* uc015:queue */ SELECT ${responseColumns}
                 FROM dbo.voyages WHERE status='QUEUED' AND validation_result='VALID' AND queue_position IS NOT NULL ORDER BY queue_position`);
             await tx.commit();

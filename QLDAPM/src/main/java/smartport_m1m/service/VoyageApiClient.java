@@ -42,4 +42,17 @@ public class VoyageApiClient {
         return restClient.get().uri("/api/voyages/queue").header("X-UC015-Key", operatorKey)
                 .retrieve().body(new ParameterizedTypeReference<>() {});
     }
+
+    public Map<String, Object> predictEta(long id, String operatorKey) {
+        return restClient.post().uri("/api/voyages/{id}/eta-prediction", id).header("X-UC015-Key", operatorKey)
+                .retrieve().body(new ParameterizedTypeReference<>() {});
+    }
+
+    public Map<String, Object> etaHistory(long id, String operatorKey, Long beforeId) {
+        return restClient.get().uri(builder -> {
+            var uri = builder.path("/api/voyages/{id}/eta-predictions");
+            if (beforeId != null) uri.queryParam("beforeId", beforeId);
+            return uri.build(id);
+        }).header("X-UC015-Key", operatorKey).retrieve().body(new ParameterizedTypeReference<>() {});
+    }
 }
