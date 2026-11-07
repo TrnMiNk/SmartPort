@@ -1,0 +1,10 @@
+{
+  "mode": "DEMO",
+  "policyId": "REPLACE_WITH_REVIEWED_LOCAL_POLICY",
+  "reviewedAt": "2000-01-01T00:00:00Z",
+  "validUntil": "2000-01-02T00:00:00Z",
+  "requiredDocumentTypesByShipType": {
+    "REPLACE_WITH_EXACT_SHIP_TYPE": ["REPLACE_WITH_REVIEWED_DOCUMENT_TYPE"]
+  },
+  "restrictedImos": []
+}

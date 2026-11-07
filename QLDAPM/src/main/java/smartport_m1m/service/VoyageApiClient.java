@@ -32,4 +32,14 @@ public class VoyageApiClient {
         return restClient.get().uri("/api/voyages/{id}", id).retrieve()
                 .body(new ParameterizedTypeReference<>() {});
     }
+
+    public Map<String, Object> validate(long id, String operatorKey) {
+        return restClient.post().uri("/api/voyages/{id}/validate", id).header("X-UC015-Key", operatorKey)
+                .retrieve().body(new ParameterizedTypeReference<>() {});
+    }
+
+    public Map<String, Object> queue(String operatorKey) {
+        return restClient.get().uri("/api/voyages/queue").header("X-UC015-Key", operatorKey)
+                .retrieve().body(new ParameterizedTypeReference<>() {});
+    }
 }

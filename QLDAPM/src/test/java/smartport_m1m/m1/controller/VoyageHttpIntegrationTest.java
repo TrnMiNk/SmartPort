@@ -50,7 +50,7 @@ class VoyageHttpIntegrationTest {
     @Autowired private WebServerApplicationContext context;
 
     private record StubResponse(int status, String body, boolean disconnect) {}
-    private record ForwardedRequest(String method, String path, String apiKey, String idem, String body) {}
+    private record ForwardedRequest(String method, String path, String apiKey, String idem, String body, String operatorKey) {}
 
     private static HttpServer startUpstream() {
         try {
@@ -59,7 +59,8 @@ class VoyageHttpIntegrationTest {
                 REQUESTS.add(new ForwardedRequest(exchange.getRequestMethod(), exchange.getRequestURI().getPath(),
                         exchange.getRequestHeaders().getFirst("X-API-Key"),
                         exchange.getRequestHeaders().getFirst("Idempotency-Key"),
-                        new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8)));
+                        new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8),
+                        exchange.getRequestHeaders().getFirst("X-UC015-Key")));
                 try {
                     StubResponse response = RESPONSE.get();
                     if (response.disconnect()) return;
@@ -226,6 +227,76 @@ class VoyageHttpIntegrationTest {
                 .POST(HttpRequest.BodyPublishers.ofString(multipart)).build(), HttpResponse.BodyHandlers.ofString());
         assertEquals(400, response.statusCode());
         assertEquals(400, JSON.readTree(response.body()).get("status").asInt());
+        assertTrue(REQUESTS.isEmpty());
+    }
+
+    private HttpResponse<String> uc015(boolean queue, String key) throws Exception {
+        var builder = request(queue ? "/api/v1/voyages/queue" : "/api/v1/voyages/41/validate");
+        if (key != null) builder.header("X-UC015-Key", key);
+        return HTTP.send((queue ? builder.GET() : builder.POST(HttpRequest.BodyPublishers.noBody())).build(),
+                HttpResponse.BodyHandlers.ofString());
+    }
+
+    private void assertUc015Forwarded(boolean queue) throws Exception {
+        var forwarded = REQUESTS.poll(2, TimeUnit.SECONDS);
+        assertNotNull(forwarded);
+        assertEquals(queue ? "GET" : "POST", forwarded.method());
+        assertEquals(queue ? "/api/voyages/queue" : "/api/voyages/41/validate", forwarded.path());
+        assertEquals(API_KEY, forwarded.operatorKey());
+        assertNull(forwarded.apiKey());
+        assertEquals("", forwarded.body());
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void uc015ForwardsPathsKeyAndSuccessJson(boolean queue) throws Exception {
+        String row = "{\"validationResult\":\"VALID\",\"validationReason\":null,\"status\":\"QUEUED\","
+                + "\"queuePosition\":1,\"predictedEta\":null,\"aiStatus\":\"UNAVAILABLE\"}";
+        String payload = queue ? "{\"success\":true,\"data\":[" + row + "]}" : row;
+        RESPONSE.set(new StubResponse(200, payload, false));
+        assertJson(uc015(queue, API_KEY), 200, payload);
+        assertUc015Forwarded(queue);
+    }
+
+    @ParameterizedTest
+    @ValueSource(ints = {400, 401, 403, 404, 409, 422, 503})
+    void uc015PreservesBusinessAndUnavailableStatusAndJson(int status) throws Exception {
+        String payload = status == 422
+                ? "{\"validationResult\":\"MISSING_DOCUMENTS\",\"validationReason\":\"DOCUMENTS_NOT_ELIGIBLE: Registry\","
+                  + "\"status\":\"ANNOUNCED\",\"queuePosition\":null,\"predictedEta\":null,\"aiStatus\":\"UNAVAILABLE\"}"
+                : "{\"success\":false,\"code\":\"ERROR_" + status + "\"}";
+        RESPONSE.set(new StubResponse(status, payload, false));
+        for (boolean queue : new boolean[] {false, true}) {
+            assertJson(uc015(queue, API_KEY), status, payload);
+            assertUc015Forwarded(queue);
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"{", "null", "[]"})
+    void uc015MapsInvalidSuccessJsonTo502(String payload) throws Exception {
+        RESPONSE.set(new StubResponse(200, payload, false));
+        assertEquals(502, uc015(false, API_KEY).statusCode());
+        assertUc015Forwarded(false);
+    }
+
+    @Test
+    void uc015MapsDatabaseErrorAndBrokenConnectionTo502() throws Exception {
+        RESPONSE.set(new StubResponse(500, "{\"internal\":\"private database details\"}", false));
+        var response = uc015(false, API_KEY);
+        assertEquals(502, response.statusCode());
+        assertFalse(response.body().contains("private database details"));
+        RESPONSE.set(new StubResponse(200, "", true));
+        assertEquals(502, uc015(true, API_KEY).statusCode());
+    }
+
+    @Test
+    void uc015RejectsMissingKeyAndBadIdBeforeUpstream() throws Exception {
+        assertEquals(401, uc015(false, null).statusCode());
+        assertEquals(401, uc015(true, null).statusCode());
+        var response = HTTP.send(request("/api/v1/voyages/0/validate").header("X-UC015-Key", API_KEY)
+                .POST(HttpRequest.BodyPublishers.noBody()).build(), HttpResponse.BodyHandlers.ofString());
+        assertEquals(400, response.statusCode());
         assertTrue(REQUESTS.isEmpty());
     }
 }

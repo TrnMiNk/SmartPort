@@ -5,12 +5,14 @@ const { sql, poolPromise } = require('./db');
 const { createShipDocumentRouter } = require('./routes/shipDocuments');
 const { createVoyageRouter } = require('./routes/voyages');
 const { createPartnerIntegrationRouter } = require('./routes/partnerIntegration');
+const { createVoyageValidationRouter } = require('./routes/voyageValidation');
 
 const app = express();
 
 app.use(cors());
 app.use(express.json());
 app.use('/api/ships', createShipDocumentRouter({ sql, poolPromise }));
+app.use('/api/voyages', createVoyageValidationRouter({ sql, poolPromise }));
 app.use('/api/voyages', createVoyageRouter({ sql, poolPromise }));
 app.use('/api/v1/integration', createPartnerIntegrationRouter({ sql, poolPromise }));
 
