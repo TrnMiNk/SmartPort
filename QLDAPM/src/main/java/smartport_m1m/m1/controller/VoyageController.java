@@ -50,4 +50,19 @@ public class VoyageController {
         if (!java.util.Set.of("127.0.0.1", "::1", "0:0:0:0:0:0:0:1", "::ffff:127.0.0.1").contains(request.getRemoteAddr()))
             throw new ResponseStatusException(HttpStatus.FORBIDDEN, "UC015 is a local demo workflow");
     }
+
+    @PostMapping("/{id}/eta-prediction")
+    public ResponseEntity<Map<String, Object>> predictEta(@PathVariable long id,
+            @RequestHeader(name = "X-UC015-Key", required = false) String key, HttpServletRequest request) {
+        requireLocal(request);
+        return ResponseEntity.ok(voyageService.predictEta(id, key));
+    }
+
+    @GetMapping("/{id}/eta-predictions")
+    public ResponseEntity<Map<String, Object>> etaHistory(@PathVariable long id,
+            @RequestHeader(name = "X-UC015-Key", required = false) String key,
+            @RequestParam(required = false) Long beforeId, HttpServletRequest request) {
+        requireLocal(request);
+        return ResponseEntity.ok(voyageService.etaHistory(id, key, beforeId));
+    }
 }

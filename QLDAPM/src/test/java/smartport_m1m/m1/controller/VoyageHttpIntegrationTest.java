@@ -50,7 +50,7 @@ class VoyageHttpIntegrationTest {
     @Autowired private WebServerApplicationContext context;
 
     private record StubResponse(int status, String body, boolean disconnect) {}
-    private record ForwardedRequest(String method, String path, String apiKey, String idem, String body, String operatorKey) {}
+    private record ForwardedRequest(String method, String path, String apiKey, String idem, String body, String operatorKey, String query) {}
 
     private static HttpServer startUpstream() {
         try {
@@ -60,7 +60,7 @@ class VoyageHttpIntegrationTest {
                         exchange.getRequestHeaders().getFirst("X-API-Key"),
                         exchange.getRequestHeaders().getFirst("Idempotency-Key"),
                         new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8),
-                        exchange.getRequestHeaders().getFirst("X-UC015-Key")));
+                        exchange.getRequestHeaders().getFirst("X-UC015-Key"), exchange.getRequestURI().getRawQuery()));
                 try {
                     StubResponse response = RESPONSE.get();
                     if (response.disconnect()) return;
@@ -296,6 +296,82 @@ class VoyageHttpIntegrationTest {
         assertEquals(401, uc015(true, null).statusCode());
         var response = HTTP.send(request("/api/v1/voyages/0/validate").header("X-UC015-Key", API_KEY)
                 .POST(HttpRequest.BodyPublishers.noBody()).build(), HttpResponse.BodyHandlers.ofString());
+        assertEquals(400, response.statusCode());
+        assertTrue(REQUESTS.isEmpty());
+    }
+
+    private HttpResponse<String> uc016(boolean history, String key) throws Exception {
+        var builder = request("/api/v1/voyages/41/" + (history ? "eta-predictions?beforeId=9007199254740993" : "eta-prediction"));
+        if (key != null) builder.header("X-UC015-Key", key);
+        return HTTP.send((history ? builder.GET() : builder.POST(HttpRequest.BodyPublishers.noBody())).build(),
+                HttpResponse.BodyHandlers.ofString());
+    }
+
+    private void assertUc016Forwarded(boolean history) throws Exception {
+        var forwarded = REQUESTS.poll(2, TimeUnit.SECONDS);
+        assertNotNull(forwarded);
+        assertEquals(history ? "GET" : "POST", forwarded.method());
+        assertEquals("/api/voyages/41/" + (history ? "eta-predictions" : "eta-prediction"), forwarded.path());
+        assertEquals(history ? "beforeId=9007199254740993" : null, forwarded.query());
+        assertEquals(API_KEY, forwarded.operatorKey());
+        assertNull(forwarded.apiKey());
+        assertEquals("", forwarded.body());
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void uc016ForwardsPathsKeyCursorAndPredictionJson(boolean history) throws Exception {
+        String row = """
+                {"voyageId":41,"declaredEta":"2026-11-20T10:00:00Z","predictedEta":"2026-11-20T09:30:00Z",
+                 "etaDeviationH":-0.5,"etaConfidence":0.8,"aiStatus":"AVAILABLE","modelVersion":"http-test-fixture-v1",
+                 "effectiveEta":"2026-11-20T09:30:00Z","predictedAt":"2026-11-19T00:00:00Z"}
+                """;
+        String payload = history ? "{\"success\":true,\"data\":[" + row + "],\"nextBeforeId\":null}" : row;
+        RESPONSE.set(new StubResponse(200, payload, false));
+        assertJson(uc016(history, API_KEY), 200, payload);
+        assertUc016Forwarded(history);
+    }
+
+    @ParameterizedTest
+    @ValueSource(ints = {400, 401, 403, 404, 409, 422, 503})
+    void uc016PreservesEveryExpectedHttpErrorAndJson(int status) throws Exception {
+        String payload = "{\"success\":false,\"code\":\"ETA_ERROR_" + status + "\",\"attempt\":{\"predictedEta\":null}}";
+        RESPONSE.set(new StubResponse(status, payload, false));
+        for (boolean history : new boolean[] {false, true}) {
+            assertJson(uc016(history, API_KEY), status, payload);
+            assertUc016Forwarded(history);
+        }
+    }
+
+    @Test
+    void uc016UnavailableFallbackPreservesNullFields() throws Exception {
+        String payload = """
+                {"voyageId":41,"predictedEta":null,"etaConfidence":null,"etaDeviationH":null,
+                 "aiStatus":"UNAVAILABLE","modelVersion":null,"effectiveEta":"2026-11-20T10:00:00Z","failureReason":"TIMEOUT"}
+                """;
+        RESPONSE.set(new StubResponse(200, payload, false));
+        assertJson(uc016(false, API_KEY), 200, payload);
+        assertUc016Forwarded(false);
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"{", "null", "[]"})
+    void uc016MapsInvalidUpstreamJsonTo502(String payload) throws Exception {
+        RESPONSE.set(new StubResponse(200, payload, false));
+        assertEquals(502, uc016(false, API_KEY).statusCode());
+    }
+
+    @Test
+    void uc016MapsServerAndConnectionFailureTo502AndRejectsMissingKeyAndBadCursor() throws Exception {
+        RESPONSE.set(new StubResponse(500, "{\"internal\":\"private details\"}", false));
+        assertEquals(502, uc016(false, API_KEY).statusCode());
+        RESPONSE.set(new StubResponse(200, "", true));
+        assertEquals(502, uc016(true, API_KEY).statusCode());
+        REQUESTS.clear();
+        assertEquals(401, uc016(false, null).statusCode());
+        assertEquals(401, uc016(true, null).statusCode());
+        var response = HTTP.send(request("/api/v1/voyages/41/eta-predictions?beforeId=0")
+                .header("X-UC015-Key", API_KEY).GET().build(), HttpResponse.BodyHandlers.ofString());
         assertEquals(400, response.statusCode());
         assertTrue(REQUESTS.isEmpty());
     }

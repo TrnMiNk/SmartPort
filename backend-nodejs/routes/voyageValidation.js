@@ -3,19 +3,10 @@ const express = require('express');
 const { loadPolicy } = require('../services/voyageValidationPolicy');
 const { createVoyageValidationService } = require('../services/voyageValidation');
 
-function createVoyageValidationRouter({ sql, poolPromise, env = process.env, policy, adapter, logger = console, clock, etaTimeoutMs }) {
-    const router = express.Router();
-    // Snapshot configuration once; never log the token or the policy's contents.
+function createUc015LocalGuard(env) {
     const enabled = env.UC015_DEMO_ENABLED === 'true' && env.NODE_ENV !== 'production';
     const token = env.UC015_OPERATOR_TOKEN;
-    let policyError = false;
-    if (policy === undefined && enabled) {
-        try { policy = loadPolicy(env.UC015_POLICY_FILE); }
-        catch (_) { policyError = true; logger.error('UC015 policy configuration invalid'); }
-    }
-    const service = createVoyageValidationService({ sql, poolPromise, policy, adapter, clock, etaTimeoutMs, env });
-
-    function protect(req, res, next) {
+    return function protect(req, res, next) {
         if (!enabled || !['127.0.0.1', '::1', '::ffff:127.0.0.1'].includes(req.socket.remoteAddress))
             return res.status(403).json({ success: false, code: 'UC015_LOCAL_DEMO_ONLY' });
         if (typeof token !== 'string' || token.length < 32 || token.length > 512)
@@ -26,7 +17,20 @@ function createVoyageValidationRouter({ sql, poolPromise, env = process.env, pol
         if (!supplied || supplied.length > 512 || !crypto.timingSafeEqual(actual, expected))
             return res.status(401).json({ success: false, code: 'INVALID_OPERATOR_KEY' });
         return next();
+    };
+}
+
+function createVoyageValidationRouter({ sql, poolPromise, env = process.env, policy, adapter, logger = console, clock, etaTimeoutMs }) {
+    const router = express.Router();
+    // Snapshot configuration once; never log the token or the policy's contents.
+    const enabled = env.UC015_DEMO_ENABLED === 'true' && env.NODE_ENV !== 'production';
+    const protect = createUc015LocalGuard(env);
+    let policyError = false;
+    if (policy === undefined && enabled) {
+        try { policy = loadPolicy(env.UC015_POLICY_FILE); }
+        catch (_) { policyError = true; logger.error('UC015 policy configuration invalid'); }
     }
+    const service = createVoyageValidationService({ sql, poolPromise, policy, adapter, clock, etaTimeoutMs, env });
 
     async function invoke(res, operation) {
         try { await operation(); }
@@ -47,4 +51,4 @@ function createVoyageValidationRouter({ sql, poolPromise, env = process.env, pol
     return router;
 }
 
-module.exports = { createVoyageValidationRouter };
+module.exports = { createVoyageValidationRouter, createUc015LocalGuard };
