@@ -45,7 +45,8 @@ public class VesselDocumentService {
         }
         String filename = file.getOriginalFilename();
         String contentType = file.getContentType();
-        String extension = filename == null ? "" : filename.substring(filename.lastIndexOf('.')).toLowerCase();
+        int extensionStart = filename == null ? -1 : filename.lastIndexOf('.');
+        String extension = extensionStart < 0 ? "" : filename.substring(extensionStart).toLowerCase();
         if (!ALLOWED_TYPES.containsKey(extension) ||
                 !ALLOWED_TYPES.get(extension).equalsIgnoreCase(contentType)) {
             throw badRequest("Chi chap nhan PDF, JPG, JPEG hoac PNG");

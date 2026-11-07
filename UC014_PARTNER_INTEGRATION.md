@@ -73,3 +73,118 @@ SELECT partner_id,endpoint_code,idempotency_key,request_fingerprint,voyage_id FR
 ## Limits
 
 Partner setup, port/agent catalog ownership, key rotation UI, request rate limits, detailed audit retention, and external monitoring are not implemented. Migration only creates missing catalog tables and does not seed data. Current IMO validation checks seven digits; SQL identity lookup is the authoritative ship match. API-key hashes are unsalted SHA-256, appropriate for high-entropy random 256-bit tokens but not human passwords. Node's legacy UC-013 route remains unchanged and continues using its existing local-demo semantics. Database-backed integration cases require a local SQL Server with reviewed migration and authorized demo fixtures.
+
+## Kiểm thử bản sửa UC-014 trên Windows
+
+Branch review: `fix/uc014-tests-http`, xuất phát từ commit `35e5cb3`. Bản sửa không chạy migration và không triển khai UC-015.
+
+### Đồng bộ và chạy kiểm thử tự động
+
+Trong repository trên máy Windows, lưu các thay đổi đang làm trước khi chuyển branch. Lần đầu lấy branch:
+
+```powershell
+git fetch origin
+git switch --track origin/fix/uc014-tests-http
+git diff 35e5cb3...HEAD
+```
+
+Nếu branch đã có trên máy, dùng `git switch fix/uc014-tests-http` rồi `git pull --ff-only`.
+
+```powershell
+cd backend-nodejs
+npm ci
+Get-ChildItem -Path *.js,routes/*.js,test/*.js | ForEach-Object {
+    node --check $_.FullName
+    if ($LASTEXITCODE -ne 0) { throw "node --check failed: $($_.FullName)" }
+}
+npm test
+cd ../QLDAPM
+# Đặt JAVA_HOME tới thư mục JDK 25 đã cài trên máy, ví dụ:
+$env:JAVA_HOME = 'C:\Program Files\Java\jdk-25'
+& "$env:JAVA_HOME\bin\java.exe" -version
+.\gradlew.bat clean test
+cd ..
+git diff --check
+```
+
+Node tests dùng SQL mock có staging/commit/rollback; Spring integration tests chạy HTTP thật với upstream giả lập cục bộ, kiểm tra status, JSON và headers. Các kết quả này **không chứng minh SQL Server/ODBC, migration, khóa đồng thời hay dữ liệu thật hoạt động**. Bộ test tự động không cần kết nối SQL Server.
+
+### Chạy với SQL Server CangThongMinh thật
+
+Yêu cầu Microsoft ODBC Driver 18 for SQL Server phù hợp kiến trúc Node, SQL Server đang chạy, và tài khoản Windows hiện tại có quyền vào `CangThongMinh`. Schema UC010–UC014 cùng partner, API-key hash, cảng và quyền trên tàu phải có sẵn; bản sửa này không tự tạo hoặc migrate chúng.
+
+Terminal PowerShell thứ nhất, từ thư mục repository:
+
+```powershell
+cd backend-nodejs
+$env:DB_SERVER = 'localhost'  # SQL Server default instance trên máy Windows
+# Nếu dùng named instance, đặt tên thực tế, ví dụ: localhost\SQL2025
+node server.js
+```
+
+`DB_SERVER=localhost` vẫn dùng Windows trusted connection; database vẫn là `CangThongMinh`. Không cần thêm password hay file `.env`. Biến được đặt trực tiếp trong terminal vì ứng dụng hiện không tự nạp `.env`. Lỗi connect được log và giữ nguyên rejection, không còn trả về pool `undefined`; Node có thể dừng nếu không kết nối được DB khi khởi động.
+
+Terminal thứ hai:
+
+```powershell
+cd QLDAPM
+$env:JAVA_HOME = 'C:\Program Files\Java\jdk-25' # thay bằng đường dẫn JDK 25 của bạn
+.\gradlew.bat bootRun
+```
+
+Xác nhận Node log kết nối thành công và Spring chạy ở cổng 8080. Ping Spring không xác nhận DB đã hoạt động.
+
+### Smoke test UC-014 (PowerShell 7)
+
+Các POST hợp lệ bên dưới tạo voyage trên DB dev/test. Dùng IMO, mã cảng và key của partner được cấp quyền sẵn; không dùng dữ liệu giả thay cho master data.
+
+```powershell
+$secureKey = Read-Host 'API key của partner test' -AsSecureString
+$apiKey = ([pscredential]::new('unused', $secureKey)).GetNetworkCredential().Password
+$imo = Read-Host 'IMO của tàu đang active và đã cấp quyền cho partner'
+$originPort = Read-Host 'Mã cảng đang active'
+$headers = @{ 'X-API-Key' = $apiKey; 'Idempotency-Key' = [guid]::NewGuid().ToString() }
+$body = @{
+    vesselImo = $imo
+    voyageNo = "UC014-$([guid]::NewGuid().ToString('N').Substring(0,16))"
+    originPortCode = $originPort
+    declaredEta = '2028-02-29T12:00:00Z'
+    cargoType = 'container'
+    declaredTeu = 10
+}
+function Send-Uc014([hashtable]$Payload) {
+    Invoke-WebRequest -Method Post -Uri 'http://localhost:8080/api/v1/integration/voyages' `
+        -Headers $headers -ContentType 'application/json' `
+        -Body ($Payload | ConvertTo-Json) -SkipHttpErrorCheck
+}
+$first = Send-Uc014 $body
+$first.StatusCode  # 201
+$first.Content
+$referenceId = ($first.Content | ConvertFrom-Json).referenceId
+(Send-Uc014 $body).StatusCode  # 200: cùng referenceId, replayed=true
+$body.declaredTeu = 11
+(Send-Uc014 $body).StatusCode  # 409 IDEMPOTENCY_KEY_REUSED
+$body.declaredTeu = 10
+$headers['Idempotency-Key'] = [guid]::NewGuid().ToString()
+(Send-Uc014 $body).StatusCode  # 409 VOYAGE_ALREADY_EXISTS, referenceId ban đầu
+$body.declaredEta = '2026-02-30T12:00:00Z'
+(Send-Uc014 $body).StatusCode  # 400, không tạo voyage
+$headers.Clear()
+Remove-Variable apiKey, secureKey
+```
+
+Với các fixture test đã được chuẩn bị riêng: key hết hạn/thu hồi hoặc partner inactive phải trả 401; partner không có quyền trên tàu trả 403; IMO không tồn tại trả 404; tàu inactive hoặc cảng không hợp lệ trả 422. Không chỉnh sửa key/master data đang được sử dụng để thử các tình huống này.
+
+Trong SSMS, chỉ đọc để đối chiếu `referenceId` trả về (thay `41` bằng ID thật):
+
+```sql
+USE [CangThongMinh];
+DECLARE @referenceId int = 41;
+SELECT id, ship_id, voyage_code, agent_id, origin_port_id, status, declared_eta, declared_teu
+FROM dbo.voyages WHERE id = @referenceId;
+SELECT * FROM dbo.voyage_status_history WHERE voyage_id = @referenceId;
+SELECT partner_id, endpoint_code, idempotency_key, voyage_id
+FROM dbo.partner_voyage_idempotency WHERE voyage_id = @referenceId;
+```
+
+Sau create và replay phải chỉ có một voyage, một history `ANNOUNCED`, một bản ghi idempotency cho scope partner/endpoint/key đó. Không chạy migration hoặc xóa dữ liệu để làm xanh các kiểm tra này.

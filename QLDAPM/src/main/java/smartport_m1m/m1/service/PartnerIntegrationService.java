@@ -26,7 +26,7 @@ public class PartnerIntegrationService {
             return result;
         } catch (RestClientResponseException ex) {
             int status = ex.getStatusCode().value();
-            if (status == 400 || status == 401 || status == 403 || status == 409 || status == 422)
+            if (status == 400 || status == 401 || status == 403 || status == 404 || status == 409 || status == 422)
                 throw new VoyageHttpException(status, parseBody(ex));
             throw new ResponseStatusException(HttpStatus.BAD_GATEWAY, "Node.js integration service unavailable");
         } catch (RestClientException ex) { throw new ResponseStatusException(HttpStatus.BAD_GATEWAY, "Node.js integration service unavailable"); }

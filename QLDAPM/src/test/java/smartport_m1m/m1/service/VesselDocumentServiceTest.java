@@ -71,6 +71,14 @@ class VesselDocumentServiceTest {
     }
 
     @Test
+    void uploadRejectsFilenameWithoutExtension() {
+        var file = new MockMultipartFile("file", "nodot", "application/pdf", "%PDF-1.7".getBytes());
+        assertEquals(HttpStatus.BAD_REQUEST, assertThrows(ResponseStatusException.class,
+                () -> service.upload(3, "Registry", file)).getStatusCode());
+        verifyNoInteractions(apiClient);
+    }
+
+    @Test
     void listAndDownloadPreserveResultsAndBinaryBody() {
         Map<String, Object> listResponse = Map.of("success", true, "data", List.of());
         when(apiClient.list(3)).thenReturn(listResponse);

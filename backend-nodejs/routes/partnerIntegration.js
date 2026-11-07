@@ -2,7 +2,17 @@ const crypto = require('node:crypto');
 const express = require('express');
 
 const text = (v, max) => typeof v === 'string' && !!v.trim() && v.trim().length <= max;
-const isoUtc = v => typeof v === 'string' && /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d{1,7})?Z$/.test(v) && !Number.isNaN(Date.parse(v));
+const isoUtc = v => {
+  if (typeof v !== 'string') return false;
+  const match = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d{1,7})?Z$/.exec(v);
+  if (!match) return false;
+  const [year, month, day, hour, minute, second] = match.slice(1).map(Number);
+  const date = new Date(v);
+  // Date.parse normalizes impossible dates (e.g. February 30); require an exact UTC match.
+  return date.getUTCFullYear() === year && date.getUTCMonth() + 1 === month &&
+    date.getUTCDate() === day && date.getUTCHours() === hour &&
+    date.getUTCMinutes() === minute && date.getUTCSeconds() === second;
+};
 
 function createPartnerIntegrationRouter({ sql, poolPromise, logger = console }) {
   const router = express.Router();
