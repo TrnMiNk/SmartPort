@@ -28,7 +28,8 @@ Quan hệ commit thực tế:
 ```
 
 - **Code nghiệp vụ mới nhất:** `feat/uc016-eta-prediction` / `26bd008`. Checkout riêng main hoặc UC014 sẽ thiếu UC015/UC016.
-- **Nhánh bàn giao:** `docs/uc016-vscode-handoff`, base chính xác `26bd008`; chỉ thêm `CODEX_VSC_HANDOFF_UC016.md`. Commit tài liệu được báo trong phản hồi bàn giao; có thể xác minh bằng `git log -1 --format=fuller -- CODEX_VSC_HANDOFF_UC016.md`.
+- **Nhánh bàn giao local:** `docs/uc016-vscode-handoff`, base chính xác `26bd008`; chỉ thêm `CODEX_VSC_HANDOFF_UC016.md`. Commit tài liệu được báo trong phản hồi bàn giao; có thể xác minh bằng `git log -1 --format=fuller -- CODEX_VSC_HANDOFF_UC016.md`.
+- **Chưa có branch tài liệu trên GitHub:** bộ duyệt tự động chặn xuất nội dung có metadata kiến trúc/server/GUID/đường dẫn Windows; đang chờ người dùng xác nhận việc đăng nguyên văn lên repository công khai. Không coi commit tài liệu local là commit đã fetch được từ GitHub. Các PR #1–#3 không bị tác động.
 - Tại thời điểm kiểm tra có 4 branch GitHub trước khi tạo branch tài liệu. Không thấy branch/PR/commit mới hơn liên quan AI ETA thật trong các ref đang có; không thể suy ra tình trạng service/data/model nằm ngoài repository hoặc commit không được ref nào trỏ tới.
 - Checkout cloud ban đầu ở `fix/uc014-tests-http` / `b97bb7d`, working tree sạch. Đã đọc code UC016 trong worktree riêng từ `26bd008`, ban đầu sạch. Không có thay đổi source nghiệp vụ đang dang dở trong workspace cloud này; chỉ có tài liệu bàn giao mới.
 - **Chưa kiểm tra được working tree Windows.** Không giả định local Windows giống GitHub. Các file policy, token, cấu hình SQL hoặc model bên ngoài Git cũng chưa được đọc.
@@ -37,6 +38,21 @@ Quan hệ commit thực tế:
 ### A2. Đồng bộ Windows an toàn
 
 Chạy trong PowerShell. Nếu `git status` có thay đổi, dừng và trình bày chúng; không tự stash, checkout đè hoặc reset.
+
+**Khi branch tài liệu chưa được phép đăng**, dùng nhánh code đã có trên GitHub trước; prompt ở mục H vẫn chứa đủ ngữ cảnh để bắt đầu kiểm tra:
+
+```powershell
+Set-Location 'C:\Users\trann\Desktop\SmartPort'
+git status --short --branch
+if (git status --porcelain) { throw 'Working tree chưa sạch; dừng để xem thay đổi local.' }
+git fetch origin refs/heads/feat/uc016-eta-prediction:refs/remotes/origin/feat/uc016-eta-prediction
+if ($LASTEXITCODE -ne 0) { throw 'Fetch thất bại; dừng.' }
+git switch --no-track -c work/uc016-ai-eta-local refs/remotes/origin/feat/uc016-eta-prediction
+if ($LASTEXITCODE -ne 0) { throw 'Không ghi đè branch local đã có; kiểm tra trước.' }
+git rev-parse HEAD
+```
+
+Các lệnh dưới đây chỉ áp dụng **sau khi người dùng cho phép đăng và đã xác nhận remote branch docs tồn tại**:
 
 ```powershell
 Set-Location 'C:\Users\trann\Desktop\SmartPort'
